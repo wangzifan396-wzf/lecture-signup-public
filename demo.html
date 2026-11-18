@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>讲座报名助手 · 离线演练</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f1f5f4;color:#183331;font:16px/1.6 system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:30px auto 80px;padding:0 20px}header,article,footer{margin:10px 0;padding:16px 22px;border-radius:12px;background:white}h1{font-size:24px;margin:5px 0}p{margin:5px 0}.kicker{font-size:12px;letter-spacing:2px;font-weight:700;color:#187061}.question-title{font-weight:650;margin-bottom:6px}textarea{width:100%;resize:none;border:1px solid #a5bcb5;border-radius:5px;font:inherit}label{display:block;padding:2px 0}button{font:inherit;color:#fff;background:#086452;border:0;padding:7px 18px;border-radius:6px;cursor:pointer}button:disabled{background:#808d87}output{display:block;font-weight:650;color:#10624c;margin-top:12px}small{color:#49625c}
+</style></head><body><main><header><div class="kicker">LOCAL / 离线练习</div><h1>讲座报名演练表</h1><p>这是模拟表单，不占真实名额。右下角助手已填入虚构资料。全自动模式和须知选项已预选。核对后，点「启动本场」即可演练。</p><small>刷新本地页面可重新演练；选择「仅填写」时，下面的提交按钮不会自动点击。</small></header>
+<form id="practice" class="form-fill-body">
+<article class="question"><div class="question-title">姓名</div><textarea rows="1" aria-label="姓名" required></textarea></article>
+<article class="question"><div class="question-title">学号</div><textarea rows="1" aria-label="学号" required></textarea></article>
+<article class="question"><div class="question-title">年级</div><label><input type="radio" name="grade" value="doctor">2026级博士</label><label><input type="radio" name="grade" value="old">2025级硕士</label><label><input type="radio" name="grade" value="master" required>2026级硕士</label></article>
+<article class="question"><div class="question-title">会议开始前15分钟开始扫码签到，会议正式结束后扫码签退</div><label><input type="checkbox" required>我已知晓</label></article>
+<footer><div class="submit-wrapper"><button id="demo-submit" type="submit">提交</button></div><output id="receipt" aria-live="polite">本地演练记录：尚未提交。</output></footer></form></main>
+<dialog id="confirmation"><p>确认提交你的结果吗？</p><button type="button" id="dismiss">取消</button> <button type="button" id="accept">确认</button></dialog>
+<output id="demo-success" hidden></output>
+<script src="demo.js"></script><script src="form.js"></script><script src="assistant.js"></script></body></html>
