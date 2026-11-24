@@ -30,8 +30,8 @@
   const gradeField = field('年级（填写本场选项的完整文字）');
   gradeField.placeholder = '例如：2025级博士';
   const delayField = field('开放后第几秒点提交', 'input', 'number');
-  Object.assign(delayField, {min:'3.1', max:'300', step:'0.1', defaultValue:'4', required:true});
-  const delayHint = add('small', controls, '例：开放时间 00:00:00，填 4 表示目标 00:00:04。若页面更晚才就绪，填完即交。开放时间留空则从启动时算。');
+  Object.assign(delayField, {min:'0', max:'300', step:'0.1', defaultValue:'3', required:true});
+  const delayHint = add('small', controls, '可填 0 至 300 秒。填 0 表示开放且四项就绪后立即点提交。时间留空则从启动时算，请按本场规则设置。');
   const saved = add('div', controls); saved.className = 'wrap';
   const openAt = field('开放时间（电脑本地时间；留空立即开始）', 'input', 'datetime-local'); openAt.step = '1';
   const mode = field('执行方式', 'select');
@@ -98,7 +98,7 @@
     if (!profile.name || profile.name.length > 60 || !/^[A-Za-z0-9-]{1,40}$/.test(profile.student)) throw Error('请输入本人姓名和学号；学号只支持字母、数字、短横线。');
   }
   function targetSeconds() {
-    if (!delayField.validity.valid) throw Error('提交秒数须为 3.1 至 300，可保留一位小数，例如 4 或 3.5。');
+    if (!delayField.validity.valid) throw Error('提交秒数须为 0 至 300，步长 0.1 秒。');
     return delayField.valueAsNumber;
   }
   if (live) {
@@ -111,7 +111,7 @@
       } catch (error) {say(error.message);}
     });
     button(saved, '清除本机资料', async () => {
-      try { await chrome.storage.local.remove('profile'); nameField.value = ''; studentField.value = ''; gradeField.value = ''; delayField.value = delayField.defaultValue; say('已清除本机资料，提交秒数恢复为 4 秒。'); } catch (error) {say(error.message);}
+      try { await chrome.storage.local.remove('profile'); nameField.value = ''; studentField.value = ''; gradeField.value = ''; delayField.value = delayField.defaultValue; say(`已清除本机资料，提交秒数恢复为 ${delayField.defaultValue} 秒。`); } catch (error) {say(error.message);}
     });
     chrome.runtime.onMessage.addListener((msg, sender, respond) => { if (msg.type === 'show') { panel.hidden = false; respond(true); } });
   } else {nameField.value = '演练同学'; studentField.value = '00123456'; gradeField.value = '2025级硕士';}
@@ -121,6 +121,7 @@
     try {
       const profile = identity(); validateProfile(profile);
       if (!agreed.checked || !notice.value.trim()) throw Error('请先核对本场须知，并勾选确认。');
+      if (!openAt.validity.valid) throw Error('请补全本场开放日期和时间，或清空后立即开始。');
       const scheduled = openAt.value !== '';
       const at = scheduled ? new Date(openAt.value).getTime() : Date.now();
       const auto = mode.value === 'full';
@@ -139,7 +140,7 @@
 
   async function track(plan, until, canConfirm) {
     const original = new URL(plan.href);
-    while (active === plan && Date.now() < until) {
+    while (active === plan) {
       if (location.origin !== original.origin || location.pathname !== original.pathname) {
         stop('已离开当前表单，结果未确认。请核对记录，不会重试。'); return;
       }
@@ -147,6 +148,7 @@
       if (blocker) {stop(`${blocker}；结果未确认，不会重试。`); return;}
       const receipt = form.receipt();
       if (receipt) {stop(`${live ? '腾讯页面回执' : '本地模拟回执'}：「${receipt}」。${plan.timeline || ''}`); return;}
+      if (Date.now() >= until) break;
       if (canConfirm && !plan.confirmed && location.href === plan.href) {
         const confirmation = form.confirmation();
         if (confirmation?.ready) {
@@ -260,7 +262,9 @@
           await track(marker, pending, false); return;
         }
         const plan = await rpc('take');
-        if (plan && plan.href === location.href && Number.isFinite(plan.delayMs)) {
+        if (plan && plan.href === location.href && Number.isFinite(plan.at) &&
+            Number.isInteger(plan.delayMs) && plan.delayMs % 100 === 0 &&
+            plan.delayMs >= 0 && plan.delayMs <= Number(delayField.max) * 1000) {
           nameField.value = plan.name; studentField.value = plan.student; gradeField.value = plan.grade ?? ''; notice.value = plan.notice;
           openAt.value = plan.openTime || '';
           mode.value = plan.auto ? 'full' : 'fill'; updateMode();

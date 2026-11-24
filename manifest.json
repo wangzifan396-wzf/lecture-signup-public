@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "讲座报名助手（公开版）",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "在腾讯文档讲座报名表中填写姓名、学号，按完整选项文字选择年级，支持仅填写或定时提交。",
   "permissions": ["storage"],
   "background": {"service_worker": "worker.js"},

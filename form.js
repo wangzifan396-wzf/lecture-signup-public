@@ -85,6 +85,8 @@
 
   function verify(plan) {
     const controls = fields(plan);
+    if ((controls.name.value && controls.name.value !== plan.name) || (controls.student.value && controls.student.value !== plan.student))
+      throw Object.assign(Error('网页里的姓名或学号已变更，请核对后重新启动。'), {mismatch:true});
     if (controls.name.value !== plan.name || controls.student.value !== plan.student || !checked(controls.grade) || !checked(controls.ack))
       throw Error('网页未保留全部四项答案；请手动核对。');
   }
