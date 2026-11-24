@@ -54,7 +54,9 @@
     const report = [live ? '腾讯实页（只读检查）' : '离线演练（只读检查）'];
     const answers = {notice:notice.value, grade:gradeField.value};
     try {form.fields(answers, false); report.push('四项匹配');} catch (error) {report.push(error.message);}
-    const problem = form.status();
+    const baseline = (live && mode.value === 'full' && form.priorResponses(answers)) || {};
+    const problem = form.status(baseline.notice, baseline.count);
+    if (baseline.notice) { baseline.notice.disconnect(); report.push('本页可按提示重新填写'); }
     if (problem) report.push(problem);
     else {
       try {form.fields(answers); report.push('可编辑');} catch (error) {report.push(`未确认可编辑：${error.message}`);}
@@ -69,6 +71,21 @@
   document.documentElement.append(host);
   let active = null, demoClaim = false;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const clockTime = ms => {
+    const date = new Date(ms);
+    return date.toTimeString().slice(0, 8) + '.' + String(date.getMilliseconds()).padStart(3, '0');
+  };
+  const relativeTime = (at, ms) => '+' + ((ms - at) / 1000).toFixed(3) + ' 秒';
+  // DOM changes wake the task promptly. The timer also covers property-only changes and animations.
+  function nextPageChange(maxMs) {
+    return new Promise(resolve => {
+      const observer = new MutationObserver(wake);
+      const timer = setTimeout(wake, maxMs);
+      function wake() { observer.disconnect(); clearTimeout(timer); resolve(); }
+      observer.observe(document.body, {subtree:true, childList:true, characterData:true, attributes:true,
+        attributeFilter:['disabled','readonly','aria-disabled','aria-checked','hidden','class','style','open']});
+    });
+  }
   async function waitUntil(plan, at) {
     while (Date.now() < at) {
       assertCurrent(plan);
@@ -86,9 +103,14 @@
     return result.value;
   };
   function say(text) { if (message.textContent !== text) message.textContent = text; }
+  function recordClick(plan, label, time) {
+    plan.timeline += ` ${label} ${relativeTime(plan.at, time)}（${clockTime(time)}）。`;
+    if (live) void rpc('receiptProgress', {claim:plan.claim, timeline:plan.timeline}).catch(() => {});
+  }
   function stop(text) {
     active?.wake?.();
-    if (live && active?.tracking) void rpc('receiptDone').catch(() => {});
+    releasePendingOnExit();
+    if (live && active?.tracking) void rpc('receiptDone', {claim:active.claim}).catch(() => {});
     active = null; controls.hidden = false; cancel.hidden = true;
     chip.textContent = chipTitle; panel.hidden = false; say(text);
   }
@@ -127,8 +149,6 @@
       const auto = mode.value === 'full';
       const delayMs = auto ? Math.round(targetSeconds() * 1000) : 0;
       if (!Number.isFinite(at) || (scheduled && Math.abs(at - Date.now()) >= 86400000)) throw Error('请填写距现在不到 24 小时的本场开放时间。');
-      const problem = form.status();
-      if (problem && !problem.includes('尚未开放')) throw Error(problem);
       run({...profile, at, openTime:openAt.value, notice:notice.value.trim(), delayMs, auto, refresh:live && refresh.checked && scheduled, href:location.href});
     } catch (error) {say(error.message);}
   }
@@ -138,101 +158,151 @@
     if (location.href !== token.href) throw Error('报名页地址已改变，本次任务停止。');
   }
 
-  async function track(plan, until, canConfirm) {
+  async function track(plan, until, canConfirm, previousNotice) {
     const original = new URL(plan.href);
     while (active === plan) {
       if (location.origin !== original.origin || location.pathname !== original.pathname) {
         stop('已离开当前表单，结果未确认。请核对记录，不会重试。'); return;
       }
-      const blocker = form.postBlocker();
-      if (blocker) {stop(`${blocker}；结果未确认，不会重试。`); return;}
-      const receipt = form.receipt();
-      if (receipt) {stop(`${live ? '腾讯页面回执' : '本地模拟回执'}：「${receipt}」。${plan.timeline || ''}`); return;}
+      const blocker = form.postBlocker(previousNotice);
+      if (blocker) {stop(`${blocker} 结果未确认，不会重试。${plan.timeline || ''}`); return;}
+      const receipt = form.receipt(plan.previousCount);
+      if (receipt) {
+        const seenAt = clockTime(Date.now());
+        stop(`${live ? '腾讯页面回执' : '本地模拟回执'}：「${receipt}」。${plan.timeline || ''} 本机看到回执 ${seenAt}。`);
+        return;
+      }
       if (Date.now() >= until) break;
       if (canConfirm && !plan.confirmed && location.href === plan.href) {
         const confirmation = form.confirmation();
         if (confirmation?.ready) {
           plan.confirmed = true;
-          plan.timeline += ` 确认 +${((Date.now() - plan.at) / 1000).toFixed(3)} 秒。`;
+          const confirmedAt = Date.now();
           confirmation.target.click();
+          recordClick(plan, '确认', confirmedAt);
           say(`已点一次确认，等待回执。脚本不会再点击。${plan.timeline}`);
         }
       }
-      await sleep(40);
+      await nextPageChange(40);
     }
     if (active === plan) stop(`结果未确认：没有识别到回执，不重复提交。请查看腾讯记录或手动检查弹窗。${plan.timeline || ''}`);
   }
 
   async function run(plan) {
     active = plan; controls.hidden = true; cancel.hidden = false; panel.hidden = false; chip.textContent = '报名助手 · 运行中';
+    let previousNotice;
     try {
+      const aim = plan.at + plan.delayMs;
+      const state = live && plan.auto ? await rpc('submissionState') : null;
+      assertCurrent(plan);
+      if (state) {
+        if (!Object.hasOwn(plan, 'startingClaim')) plan.startingClaim = state.token;
+        if (state.busy || plan.startingClaim !== state.token) throw Error('这份表的另一轮任务已开始，不再重复点击。请先核对该轮结果。');
+      }
+      let baselineReady = false;
+      const beforeFilling = () => {
+        if (state && !baselineReady) {
+          const baseline = form.priorResponses(plan);
+          if (baseline) {
+            previousNotice = baseline.notice;
+            plan.previousCount = baseline.count;
+            baselineReady = true;
+          }
+        }
+        return form.status(previousNotice, plan.previousCount);
+      };
+      const initialStatus = beforeFilling();
+      if (initialStatus && !initialStatus.includes('尚未开放')) throw Error(initialStatus);
       if (Date.now() < plan.at) {
-        say(`等待 ${new Date(plan.at).toLocaleTimeString('zh-CN', {hour12:false})} 开放。可切屏；需要停止时请点取消。`);
+        say(`等待 ${clockTime(plan.at)} 开放。${plan.auto ? '本机提交目标 ' + clockTime(aim) + '。' : ''}可切屏。`);
         await waitUntil(plan, plan.at);
       }
       let lastIssue = '';
+      let unchangedSince = Date.now();
       for (;;) {
         assertCurrent(plan);
-        const problem = form.status();
+        const problem = beforeFilling();
         if (problem && !problem.includes('尚未开放')) throw Error(problem);
+        let needsRefresh = Boolean(problem);
         try { if (problem) throw Error(problem); form.fields(plan); break; } catch (error) {
           if (error.ambiguous || error.mismatch) throw error;
+          needsRefresh ||= Boolean(error.preview);
+          if (lastIssue !== error.message) unchangedSince = Date.now();
           lastIssue = error.message;
         }
-        if (plan.refresh && Date.now() >= plan.at + 250) {
+        const now = Date.now();
+        const previewStillClosed = needsRefresh && now >= plan.at + 150;
+        const loadingStalled = document.readyState === 'complete' && now - unchangedSince >= 1500;
+        if (plan.refresh && (previewStillClosed || loadingStalled)) {
           plan.refresh = false;
+          plan.refreshedAt = Date.now();
           say('到点仍不可填写，正在刷新一次。');
           await rpc('stash', plan);
           try { assertCurrent(plan); } catch (error) { await rpc('drop'); throw error; }
           location.reload(); return;
         }
-        say(`等待题目可编辑：${lastIssue} 可取消。`); await sleep(Date.now() - plan.at < 30000 ? 80 : 500);
+        say(`等待题目可编辑：${lastIssue} 可取消。`); await nextPageChange(Date.now() - plan.at < 30000 ? 80 : 500);
       }
       assertCurrent(plan);
       form.fill(plan);
       if (!plan.auto) { await sleep(80); assertCurrent(plan); form.verify(plan); stop('四项已填写并核对，未点击提交。请自行检查并提交。'); return; }
-      const aim = plan.at + plan.delayMs;
-      say(`四项已填写。目标是开放后 +${plan.delayMs / 1000} 秒；若已过目标，就绪后立即提交。`);
-      await waitUntil(plan, aim);
-      const preClick = () => {
-        assertCurrent(plan); const problem = form.status(); if (problem) throw Error(problem);
-        form.verify(plan); return form.submitButton();
-      };
-      for (;;) {
+      plan.timeline = `本机目标 ${clockTime(aim)}。${plan.refreshedAt ? ' 刷新 ' + relativeTime(plan.at, plan.refreshedAt) + '。' : ''} 填好 ${relativeTime(plan.at, Date.now())}。`;
+      say(`四项已填写。${plan.timeline}`);
+      // Prepare the durable duplicate guard just before the deadline, then recheck the live form at click time.
+      await waitUntil(plan, aim - 150);
+      const readyButton = () => {
         assertCurrent(plan);
-        const problem = form.status(); if (problem) throw Error(problem);
-        try { form.verify(plan); form.submitButton(); break; } catch (error) {
+        const problem = form.status(previousNotice, plan.previousCount); if (problem) throw Error(problem);
+        let target;
+        try { form.verify(plan); target = form.submitButton(); } catch (error) {
           if (error.ambiguous || error.mismatch) throw error;
-          lastIssue = error.message;
+          say(`四项已填写，仍在等待：${error.message} 可取消。`); return null;
         }
-        say(`已过目标时刻，仍在等待：${lastIssue} 可取消。`);
-        await sleep(Date.now() - plan.at < 30000 ? 40 : 500);
-      }
-      if (form.confirmation() || form.receipt()) throw Error('提交前已有弹窗或回执，不启动自动确认。');
-      const claim = live ? await rpc('claim') : !demoClaim;
-      if (!claim) throw Error('本次浏览器会话已为此表保留过一次提交，不再重复点击。');
-      let elapsed;
-      try {
-        const target = preClick();
-        elapsed = Date.now() - plan.at;
-        if (elapsed < plan.delayMs) throw Error('本机时钟变化，未自动提交。');
-        if (!live) demoClaim = true;
-        plan.timeline = `提交 +${(elapsed / 1000).toFixed(3)} 秒。`;
-        plan.tracking = true;
-        plan.submitted = true;
-        target.click();
-      } finally {
-        if (live && !plan.submitted) await rpc('releaseUnclicked', {claim});
+        if (form.confirmation() || form.receipt(plan.previousCount)) throw Error('提交前已有弹窗或回执，不启动自动确认。');
+        return target;
+      };
+      while (!plan.submitted) {
+        if (readyButton()) {
+          const claim = live ? crypto.randomUUID() : true;
+          plan.claim = claim;
+          try {
+            const requestedAt = Date.now();
+            const granted = live ? await rpc('claim', {claim, startingClaim:plan.startingClaim, previousCount:plan.previousCount}) : !demoClaim;
+            if (!granted) throw Error('这份表已由另一轮任务操作，不再重复点击。');
+            await waitUntil(plan, aim);
+            const target = readyButton();
+            if (target) {
+              const clickedAt = Date.now();
+              // A suspended tab can outlive the worker's reservation. Reacquire it before clicking.
+              if (live && clickedAt - requestedAt >= 30000) continue;
+              if (clickedAt < aim) throw Error('本机时钟变化，未自动提交。');
+              if (!live) demoClaim = true;
+              plan.tracking = plan.submitted = true;
+              target.click();
+              recordClick(plan, '提交', clickedAt);
+            }
+          } finally {
+            if (live && !plan.submitted) { await rpc('releaseUnclicked', {claim}); plan.claim = null; }
+          }
+        }
+        if (!plan.submitted) await nextPageChange(Date.now() - plan.at < 30000 ? 40 : 500);
       }
       say(`已点一次提交，等待确认框或回执。${plan.timeline}`);
-      await track(plan, Date.now() + 30000, true);
+      await track(plan, Date.now() + 30000, true, previousNotice);
     } catch (error) { if (active === plan) stop(error.message); }
+    finally { previousNotice?.disconnect(); }
   }
 
   window.addEventListener('hashchange', () => {
     if (active && !active.submitted && location.href !== active.href) stop('报名页地址已改变，本次任务停止。');
   });
-  window.addEventListener('pagehide', () => {active?.wake?.(); active = null;});
+  function releasePendingOnExit() {
+    if (live && active?.claim && !active.submitted) void rpc('releaseUnclicked', {claim:active.claim}).catch(() => {});
+  }
+  window.addEventListener('pagehide', () => {
+    releasePendingOnExit();
+    active?.wake?.(); active = null;
+  });
   window.addEventListener('pageshow', event => {if (event.persisted) stop('页面从历史记录恢复；如需执行，请重新启动。');});
   document.addEventListener('click', event => {
     if (!active || !event.isTrusted || event.composedPath().includes(host)) return;
@@ -256,10 +326,10 @@
         }
         const pending = await rpc('receiptPending');
         if (pending) {
-          const marker = {href:location.href, tracking:true, submitted:true};
+          const marker = {href:location.href, tracking:true, submitted:true, claim:pending.token, timeline:pending.timeline || '', previousCount:pending.previousCount || 0};
           active = marker; panel.hidden = false; controls.hidden = true; cancel.hidden = false;
           say('页面已跳转，仅检查回执，不再点击。');
-          await track(marker, pending, false); return;
+          await track(marker, pending.until, false); return;
         }
         const plan = await rpc('take');
         if (plan && plan.href === location.href && Number.isFinite(plan.at) &&

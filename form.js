@@ -12,18 +12,59 @@
   const defaultNotice = '会议开始前15分钟开始扫码签到，会议正式结束后扫码签退';
   const submitLabels = new Set(['提交', '提交报名', '提交报名表', '提交表单']);
   const receiptPattern = /^(?:(?:你|您)?(?:已成功提交|提交成功|填写成功)|已报名成功|报名成功|(?:你|您|我)已提交[1-9]\d*份)[!。！]?$/;
+  const countPattern = /^(?:你|您|我)已提交([1-9]\d*)份[!。！]?$/;
+  function isNewReceipt(text, previousCount = 0) {
+    const count = text.match(countPattern);
+    return count ? Number(count[1]) > previousCount : receiptPattern.test(text);
+  }
 
-  function status() {
+  function rejectedSubmission(lines, previous) {
+    const match = lines.join('\n').match(/(?:^|\n)(填写内容不合规(?:或者|或)被创建者删除(?:,?\n?请重新填写(?:并)?提交)?)[。.!]?(?=\n|$)/);
+    if (match && previous?.unchanged() && lines.join('').match(/填写内容不合规(?:或者|或)被创建者删除/g)?.length === 1) return '';
+    return match ? `腾讯页面提示「${match[1].replace(/\n/g, '').replace(',', '，')}」。` : '';
+  }
+
+  // Remember the specific pre-existing invitation to refill. A newly rendered rejection belongs to this run.
+  function previousRefillNotice() {
+    const invitation = /^填写内容不合规(?:或者|或)被创建者删除,?请重新填写(?:并)?提交[。.!]?$/;
+    if (!/填写内容不合规(?:或者|或)被创建者删除,?请重新填写(?:并)?提交/.test(compact(document.body.innerText))) return null;
+    const candidates = Array.from(document.body.querySelectorAll('p,div,span,output,li,section,[role="alert"],[role="status"]'))
+      .filter(node => invitation.test(compact(node.textContent)) && visible(node) && !node.closest('.question'));
+    const leaves = candidates.filter(node => !candidates.some(other => other !== node && node.contains(other)));
+    if (leaves.length !== 1) return null;
+    const node = leaves[0];
+    let changed = false;
+    const observer = new MutationObserver(() => { changed = true; });
+    observer.observe(node, {subtree:true, childList:true, characterData:true, attributes:true, attributeFilter:['hidden','aria-hidden']});
+    return {
+      unchanged() {
+        if (observer.takeRecords().length || !visible(node)) changed = true;
+        return !changed;
+      },
+      disconnect() { observer.disconnect(); }
+    };
+  }
+
+  function priorResponses(answers) {
+    try { fields(answers); } catch { return null; }
+    const lines = document.body.innerText.split(/\n+/).map(compact);
+    const count = lines.reduce((max, line) => Math.max(max, Number(line.match(countPattern)?.[1] || 0)), 0);
+    return {count, notice:previousRefillNotice()};
+  }
+
+  function status(previous, previousCount = 0) {
     const lines = document.body.innerText.split(/\n+/).map(compact);
     const text = lines.join('');
-    if (lines.some(line => receiptPattern.test(line) || line === '生成凭证')) return '这份表已有提交记录。';
+    const rejected = rejectedSubmission(lines, previous);
+    if (rejected) return rejected;
+    if (lines.some(line => isNewReceipt(line, previousCount) || line === '生成凭证')) return '这份表已有提交记录。';
     if (/名额已满|名额已用完|人数已满|已达收集上限|份数已达上限|已收满/.test(text)) return '报名名额已满。';
     const cap = text.match(/限量(\d+)份/), count = text.match(/已收集(\d+)份/);
     if (cap && count && Number(count[1]) >= Number(cap[1])) return '已收集份数达到上限。';
     if (/收集表登录后才能填写|请先登录后填写|登录后才可填写/.test(text)) return '请先手动登录腾讯文档。';
     if (/已暂停收集|已停止收集|已结束收集|收集已结束|报名已结束/.test(text)) return '表单已暂停或结束收集。';
     if (/未开始收集|收集未开始|暂未开始|报名未开始|尚未开始/.test(text)) return '表单尚未开放。';
-    if (list(document, '[role="dialog"],dialog[open],[aria-modal="true"],iframe[title*="验证"]').length) return '页面有弹窗或验证，请手动处理。';
+    if (list(document, modalSelector + ',iframe[title*="验证"]').length) return '页面有弹窗或验证，请手动处理。';
     return '';
   }
 
@@ -43,7 +84,7 @@
         const preview = list(question, '.question-content.readonly .form-ui-component-basic-text.disabled');
         if (preview.length === 1) {
           if (!writable) return preview[0];
-          throw Error(`「${title}」是只读预览，尚未提供输入框。`);
+          throw Object.assign(Error(`「${title}」是只读预览，尚未提供输入框。`), {preview:true});
         }
       }
       return unique(inputs, `「${title}」输入框`);
@@ -132,21 +173,23 @@
     return {target, ready: !locked(target) && target.contains(hit)};
   }
 
-  function receipt() {
+  function receipt(previousCount = 0) {
     const lines = document.body.innerText.split(/\n+/).map(compact);
-    if (!lines.some(line => receiptPattern.test(line))) return '';
+    if (!lines.some(line => isNewReceipt(line, previousCount))) return '';
     const nodes = list(document,'[role="status"],[role="alert"],output,h1,h2,h3,p,div,span,strong').filter(item =>
-      item.children.length <= 1 && !item.closest('.question,.form-head,header,[role="toolbar"],button') && receiptPattern.test(compact(item.innerText)));
+      item.children.length <= 1 && !item.closest('.question,.form-head,header,[role="toolbar"],button') && isNewReceipt(compact(item.innerText), previousCount));
     const editable = list(document,'.question textarea,.question input').some(item => !locked(item));
     const match = nodes.find(item => !editable || item.closest('[role="status"],[role="alert"],output,[class*="success"],[class*="toast"],[class*="receipt"]'));
     return match ? compact(match.innerText) : '';
   }
 
-  function postBlocker() {
+  function postBlocker(previous) {
     const lines = document.body.innerText.split(/\n+/).map(compact);
+    const rejected = rejectedSubmission(lines, previous);
+    if (rejected) return rejected;
     if (lines.some(line => /^(?:提交失败|提交出错|网络异常|网络错误|名额已满|收集已结束|已暂停收集|请完成验证|安全验证|收集表登录后才能填写)(?:$|[,:;。!，：；！])/.test(line)) ||
         list(document,'iframe[title*="验证"],iframe[src*="captcha" i]').length) return '页面提示失败、不可填写或需要验证';
     return '';
   }
-  globalThis.LectureForm = {defaultNotice, status, fields, fill, verify, submitButton, submitLabels, caption, confirmation, receipt, postBlocker};
+  globalThis.LectureForm = {defaultNotice, priorResponses, status, fields, fill, verify, submitButton, submitLabels, caption, confirmation, receipt, postBlocker};
 })();
